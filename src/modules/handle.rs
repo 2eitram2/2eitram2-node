@@ -1,12 +1,12 @@
 use super::crypto;
 use super::utils;
 use super::super::CONNECTIONS;
-use super::super::REQUEST_HASHES;
 use super::utils::check_ts_validity;
 use tokio::{
     io::AsyncWriteExt,
     sync::Mutex,
 };
+use std::net::IpAddr;
 use std::sync::Arc;
 use bytes::BytesMut;
 use hex;
@@ -57,14 +57,24 @@ pub async fn forward(
     }
     else {
         println!("No connection for {}", user_id_hex);
-        let result = utils::find_closest_nodes(user_id_bytes).await;
-        println!("{:?}", result);
+        match utils::find_closest_nodes(user_id_bytes).await {
+            Ok((primary_node_ip, _)) =>{
+                let ip: IpAddr = primary_node_ip.parse().expect("Invalid IP address");
+                if ip!= IpAddr::V4(std::net::Ipv4Addr::new(0,0,0,0)) {
+                    let _  = utils::send_tcp_message(&ip, &buffer).await;
+                }
+            }
+            _ => {
+                println!("Error while finding closest nodes");
+            }
+        }
     }
 }
 
 pub async fn handle_connect(
     buffer: &BytesMut,
-    writer: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>
+    writer: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    user_id:  &mut String
 ) {
     let payload_size_bytes = &buffer[1..3];
     let payload_size = u16::from_le_bytes([payload_size_bytes[0], payload_size_bytes[1]]) as usize;
@@ -87,17 +97,7 @@ pub async fn handle_connect(
     }
 
     let public_id = crypto::sha256_hash(&public_key_bytes);
-    
-    let unique_request_hash = crypto::sha256_hash(&buffer);
-    {
-        let mut hashes = REQUEST_HASHES.lock().await;
-        if hashes.contains(&unique_request_hash) {
-            println!("Duplicate request detected");
-            return;
-        }
-        hashes.insert(unique_request_hash);
-    }
-
+    user_id.push_str(&public_id);
     {
         let mut conn_map = CONNECTIONS.write().await;
         conn_map.insert(public_id.clone(), Arc::clone(&writer));
@@ -113,7 +113,7 @@ pub async fn handle_node_assignement(
     let payload_size = u16::from_le_bytes([payload_size_bytes[0], payload_size_bytes[1]]) as usize;
 
     let signature_length_bytes = &buffer[3..5];
-    let signature_length = u16::from_le_bytes([signature_length_bytes[0], signature_length_bytes[1]]) as usize;           
+    let signature_length = u16::from_le_bytes([signature_length_bytes[0], signature_length_bytes[1]]) as usize;         
     let signature = &buffer[5..signature_length + 5];
     
     let public_key_bytes = &buffer[signature_length + 5 .. signature_length + 5 + 1952];
@@ -123,9 +123,11 @@ pub async fn handle_node_assignement(
     let timestamp = utils::uint8_array_to_ts(&timestamp_bytes);
     let result = verify(signature, data_to_sign_bytes, public_key_bytes).is_ok();
     if !result {
+        println!("Invalid signature");
         return;
     }
     if !utils::check_ts_validity(timestamp) {
+        println!("Invalid timestamp");
         return;
     }
 
@@ -139,7 +141,7 @@ pub async fn handle_node_assignement(
             buffer.extend_from_slice(primary_node_ip.as_bytes());
             buffer.extend_from_slice(" ".as_bytes());
             println!("Primary node {:?} \nFallbackNodes{:?}", primary_node_ip, fallback_nodes);
-            // Include fallback nodes if any
+            
             for node_ip in fallback_nodes {
                 buffer.extend_from_slice(node_ip.as_bytes());
                 buffer.extend_from_slice(" ".as_bytes());

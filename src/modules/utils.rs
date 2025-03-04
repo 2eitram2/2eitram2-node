@@ -18,13 +18,11 @@ pub fn check_ts_validity(ts: u64) -> bool {
 }
 
 pub async fn send_tcp_message(ip: &IpAddr, buffer: &[u8]) -> Result<(), Box<dyn Error>> {
-    // Create a SocketAddr from the IpAddr and port
     let addr: SocketAddr = SocketAddr::new(*ip, 8081);
 
     for attempt in 1..=3 {
         match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr)).await {
             Ok(Ok(mut stream)) => {
-                // Send the message from the buffer
                 stream.write_all(buffer).await?;
                 stream.flush().await?;
                 println!("Message sent to {}", ip);
@@ -65,7 +63,6 @@ pub async fn find_closest_nodes(user_id_bytes: &[u8]) -> Result<(String, Vec<Str
 
     let mut distances: Vec<(u128, String)> = {
         let node_hash_map = NODES_HASHMAP.lock().await;
-        println!("{:?}", node_hash_map);
 
         node_hash_map.iter()
             .map(|(node_ip, node_hash_str)| {

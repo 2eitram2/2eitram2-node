@@ -8,12 +8,12 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::RwLock;
-mod modules;
 use bytes::BytesMut;
 use std::fs::{OpenOptions, read_to_string};
 use std::io::{self, Write};
 use std::path::Path;
 use std::net::IpAddr;
+mod modules;
 
 lazy_static::lazy_static! {
     pub static ref REQUEST_HASHES: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -66,13 +66,23 @@ async fn handle_client(
     let mut buffer = BytesMut::with_capacity(1024);
     let (mut read_half, write_half) = socket.into_split();
     let writer = Arc::new(Mutex::new(write_half));
+    let mut user_id = String::new();
 
     loop {
         match read_half.read_buf(&mut buffer).await {
             Ok(0) => break,
             Ok(n) => {
+                if n == 0 {
+                    if user_id.len() > 0 {
+                        let mut connections = CONNECTIONS.write().await;
+                        connections.remove(&user_id);
+                        println!("{:?}", connections)
+                    }
+                    break;
+                }
                 if n < 3 {
                     println!("[ERROR] Invalid packet: too short");
+                    buffer.clear();
                     continue;
                 }
                 let prefix = &buffer[0..3];
@@ -81,9 +91,19 @@ async fn handle_client(
                 if buffer.len() < payload_size as usize {
                     continue;
                 }
+                let unique_request_hash = modules::crypto::sha256_hash(&buffer);
+                {
+                    let mut hashes = REQUEST_HASHES.lock().await;
+                    if hashes.contains(&unique_request_hash) {
+                        println!("Duplicate request detected");
+                        buffer.clear();
+                        continue;
+                    }
+                    hashes.insert(unique_request_hash);
+                }
                 match prefix[0] {
                     0 => handle_new_node(&addr).await,
-                    1 => modules::handle::handle_connect(&buffer, writer.clone()).await,
+                    1 => modules::handle::handle_connect(&buffer, writer.clone(), &mut user_id).await,
                     2..=4 => modules::handle::forward(&buffer).await,
                     10 => modules::handle::handle_node_assignement(&buffer, writer.clone()).await,
                     _ => println!("Data not recognized"),
@@ -92,6 +112,11 @@ async fn handle_client(
             }
             Err(e) => {
                 println!("[ERROR] Failed to read from socket: {}", e);
+                if user_id.len() > 0 {
+                    let mut connections = CONNECTIONS.write().await;
+                    connections.remove(&user_id);
+                    println!("{:?}", connections)
+                }
                 break;
             }
         }
