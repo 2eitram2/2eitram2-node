@@ -3,8 +3,10 @@ use tokio::{
     net::TcpStream,
     io::AsyncWriteExt,
 };
+
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::error::Error;
-use std::cmp;
 use std::net::SocketAddr;
 use std::time::Duration;
 use std::net::IpAddr;
@@ -54,43 +56,79 @@ pub fn uint8_array_to_ts(arr: &[u8]) -> u64 {
     ((high as u64) << 32) | low as u64
 }
 
+#[derive(Eq, PartialEq)]
+struct NodeDistance {
+    distance: Vec<u8>,  // XOR distance
+    node_ip: String,
+}
+
+// Implementing the Ord trait for NodeDistance so that BinaryHeap uses it
+impl Ord for NodeDistance {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // We want the heap to be a min-heap, so we reverse the comparison
+        self.distance.cmp(&other.distance)
+    }
+}
+
+// Implementing PartialOrd for NodeDistance
+impl PartialOrd for NodeDistance {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 pub async fn find_closest_nodes(user_id_bytes: &[u8]) -> Result<(String, Vec<String>), &'static str> {
-    if user_id_bytes.len() < 16 {
-        return Err("user_id_bytes must be at least 16 bytes long");
+    let start = Utc::now();
+
+    if user_id_bytes.len() < 32 {
+        return Err("user_id_bytes must be at least 32 bytes long");
     }
 
-    let user_id_int = u128::from_le_bytes(user_id_bytes[0..16].try_into().unwrap());
+    // Limit to N closest nodes, let's say 6
+    let N = 6;
 
-    let mut distances: Vec<(u128, String)> = {
-        let node_hash_map = NODES_HASHMAP.lock().await;
+    let mut closest_nodes = BinaryHeap::with_capacity(N);
 
-        node_hash_map.iter()
-            .map(|(node_ip, node_hash_str)| {
-                let node_hash_bytes = hex::decode(node_hash_str).expect("Invalid hex string for node hash");
-                let node_int = u128::from_le_bytes(node_hash_bytes[0..16].try_into().unwrap());
+    let node_hash_map = NODES_HASHMAP.lock().await;
 
-                let distance = if user_id_int > node_int {
-                    user_id_int - node_int
-                } else {
-                    node_int - user_id_int
-                };
+    for (node_ip, node_hash_str) in node_hash_map.iter() {
+        let node_hash_bytes = hex::decode(node_hash_str).expect("Invalid hex string for node hash");
 
-                (distance, node_ip.to_string())
-            })
-            .collect()
-    };
+        // Compute XOR distance (bitwise difference)
+        let distance: Vec<u8> = user_id_bytes.iter()
+            .zip(node_hash_bytes.iter())
+            .map(|(a, b)| a ^ b)
+            .collect();
 
-    distances.sort_by_key(|k| k.0);
+        let node_distance = NodeDistance {
+            distance,
+            node_ip: node_ip.to_string(),
+        };
 
-    let primary_node_ip = distances.get(0).map_or_else(|| "".to_string(), |x| x.1.clone());
+        // Push the node into the heap
+        closest_nodes.push(node_distance);
 
-    let fallback_nodes: Vec<String> = distances[1..cmp::min(distances.len(), 6)]
-        .iter()
-        .map(|k| k.1.clone())
+        // If the heap exceeds the limit, pop the farthest node
+        if closest_nodes.len() > N {
+            closest_nodes.pop();
+        }
+    }
+
+    // The heap will now contain only the closest N nodes
+    let primary_node_ip = closest_nodes.peek().map_or_else(|| "".to_string(), |x| x.node_ip.clone());
+
+    let fallback_nodes: Vec<String> = closest_nodes.iter()
+        .map(|x| x.node_ip.clone())
         .collect();
+
+    let end = Utc::now();
+    let duration = end.signed_duration_since(start);
+    println!("Took: {}ms", duration.num_milliseconds());
 
     Ok((primary_node_ip, fallback_nodes))
 }
+
+
 
 pub fn ip_to_bytes(ip: IpAddr) -> Vec<u8> {
     match ip {

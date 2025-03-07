@@ -30,10 +30,22 @@ lazy_static::lazy_static! {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let listener = TcpListener::bind("0.0.0.0:8081").await?;
+    let listener = match TcpListener::bind("0.0.0.0:8081").await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Failed to bind to port: {}", e);
+            return Err(e);
+        }
+    };
     let _ = modules::load::remake_nodes_hashmap("nodes.txt", &NODES_HASHMAP).await;
     loop {
-        let (socket, addr) = listener.accept().await?;
+        let (socket, addr) = match listener.accept().await {
+            Ok(pair) => pair,   // If successful, unpack the tuple
+            Err(e) => {
+                eprintln!("Failed to accept connection: {}", e);
+                continue;  // Skip this iteration and try again
+            }
+        };
 
         tokio::spawn(handle_client(socket, addr));
     }

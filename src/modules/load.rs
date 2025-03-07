@@ -24,7 +24,5 @@ pub async fn remake_nodes_hashmap(file_path: &str, nodes_hashmap: &Arc<Mutex<Has
             hashmap.insert(ip, hash);
         }
     }
-    println!("{:?}", hashmap);
-
     Ok(())
 }

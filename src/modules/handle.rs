@@ -11,6 +11,7 @@ use std::sync::Arc;
 use bytes::BytesMut;
 use hex;
 use pqc_dilithium::verify;
+use ed25519_dalek::{PublicKey, Signature, Verifier};
 
 pub async fn forward(
     buffer: &BytesMut
@@ -18,31 +19,41 @@ pub async fn forward(
 
     let payload_size_bytes = &buffer[1..3];
     let payload_size = u16::from_le_bytes([payload_size_bytes[0], payload_size_bytes[1]]) as usize;
-    
-    let signature_length_bytes = &buffer[3..5];
-    let signature_length = u16::from_le_bytes([signature_length_bytes[0], signature_length_bytes[1]]) as usize;           
-    let signature = &buffer[5..signature_length + 5];
-    
-    let public_key_bytes = &buffer[signature_length + 5 .. signature_length + 5 + 1952];
 
-    let user_id_bytes = &buffer[signature_length + 5 + 1952 .. signature_length + 32 + 5 + 1952];
+    let dilithium_signature = &buffer[5 .. 5 + 3293];
+    let ed25519_signature = &buffer[5 + 3293 .. 5 + 3293 + 64];
+
+    let dilithium_public_key_bytes = &buffer[5 + 3293 + 64 .. 5 + 3293 + 64 + 1952];
+    let ed25519_public_key = &buffer[5 + 3293 + 64 + 1952 .. 5 + 3293 + 64 + 1952 + 32];
+
+    let user_id_bytes = &buffer[5 + 3293 + 64 + 1952 + 32 .. 5 + 3293 + 64 + 1952 + 32 + 32];
     let user_id_hex = hex::encode(user_id_bytes);
 
-    let timestamp_bytes = &buffer[signature_length + 32 + 5 + 1952 .. signature_length + 32 + 5 + 1952 + 8];
+    let timestamp_bytes = &buffer[5 + 3293 + 64 + 1952 + 32 + 32 + 16 .. 5 + 3293 + 64 + 1952 + 32 + 32 + 16 + 8];
     let timestamp = utils::uint8_array_to_ts(&timestamp_bytes);
 
-    let data_to_sign_bytes = &buffer[signature_length + 5 .. payload_size];
+    let data_to_sign_bytes = &buffer[5 + 3293 + 64 .. payload_size];
 
     if !check_ts_validity(timestamp) {
         println!("[ERROR] Timestamp invalid, dropping message");
     }
 
-    if !verify(signature, data_to_sign_bytes, public_key_bytes).is_ok() {
+    if !verify(&dilithium_signature, &data_to_sign_bytes, &dilithium_public_key_bytes).is_ok() {
         println!("[ERROR] Invalid signature, dropping message.");
         return;
     }
     
-    
+    match PublicKey::from_bytes(ed25519_public_key) {
+        Ok(public_key) => {
+            let signature = Signature::from_bytes(ed25519_signature).unwrap();
+            match public_key.verify(data_to_sign_bytes, &signature) {
+                Ok(_) => println!("✅ Ed25519 Signature is valid!"),
+                Err(_) => return,
+            }
+        },
+        Err(_) => return,
+    }
+
     let connection = {
         let connections = CONNECTIONS.read().await;
         connections.get(&user_id_hex).cloned()
@@ -78,25 +89,44 @@ pub async fn handle_connect(
 ) {
     let payload_size_bytes = &buffer[1..3];
     let payload_size = u16::from_le_bytes([payload_size_bytes[0], payload_size_bytes[1]]) as usize;
+   
+    let dilithium_signature = &buffer[5 .. 5 + 3293];
+    let ed25519_signature = &buffer[5 + 3293 .. 5 + 3293 + 64];
 
-    let signature_length_bytes = &buffer[3..5];
-    let signature_length = u16::from_le_bytes([signature_length_bytes[0], signature_length_bytes[1]]) as usize;           
-    let signature = &buffer[5..signature_length + 5];
+    let dilithium_public_key_bytes = &buffer[5 + 3293 + 64 .. 5 + 3293 + 64 + 1952];
+    let ed25519_public_key = &buffer[5 + 3293 + 64 + 1952 .. 5 + 3293 + 64 + 1952 + 32];
+    let nonce = &buffer[5 + 3293 + 64 + 1952 + 32 .. 5 + 3293 + 64 + 1952 + 32 + 16];
+
+    let data_to_sign_bytes = &buffer[5 + 3293 + 64 .. payload_size];
     
-    let public_key_bytes = &buffer[signature_length + 5 .. signature_length + 5 + 1952];
-    let data_to_sign_bytes = &buffer[signature_length + 5 .. payload_size];
-
-    let timestamp_bytes = &buffer[signature_length + 5 + 1952 .. payload_size];
+    let timestamp_bytes = &buffer[5 + 3293 + 64 + 1952 + 32 + 16 .. payload_size];
     let timestamp = utils::uint8_array_to_ts(&timestamp_bytes);
-    let result = verify(signature, data_to_sign_bytes, public_key_bytes).is_ok();
+
+    match PublicKey::from_bytes(ed25519_public_key) {
+        Ok(public_key) => {
+            let signature = Signature::from_bytes(ed25519_signature).unwrap();
+            match public_key.verify(data_to_sign_bytes, &signature) {
+                Ok(_) => println!("✅ Ed25519 Signature is valid!"),
+                Err(_) => return,
+            }
+        },
+        Err(_) => return,
+    }
+    let result = verify(dilithium_signature, data_to_sign_bytes, dilithium_public_key_bytes).is_ok();
     if !result {
         return;
     }
     if !utils::check_ts_validity(timestamp) {
         return;
     }
+    let full_hash_input = [
+        &dilithium_public_key_bytes[..],
+        &ed25519_public_key[..],         
+        &nonce[..],                      
+    ].concat();
 
-    let public_id = crypto::sha256_hash(&public_key_bytes);
+    let public_id = crypto::sha256_hash(&full_hash_input);
+
     user_id.push_str(&public_id);
     {
         let mut conn_map = CONNECTIONS.write().await;
@@ -112,14 +142,12 @@ pub async fn handle_node_assignement(
     let payload_size_bytes = &buffer[1..3];
     let payload_size = u16::from_le_bytes([payload_size_bytes[0], payload_size_bytes[1]]) as usize;
 
-    let signature_length_bytes = &buffer[3..5];
-    let signature_length = u16::from_le_bytes([signature_length_bytes[0], signature_length_bytes[1]]) as usize;         
-    let signature = &buffer[5..signature_length + 5];
+    let signature = &buffer[5..3293 + 5];
     
-    let public_key_bytes = &buffer[signature_length + 5 .. signature_length + 5 + 1952];
-    let data_to_sign_bytes = &buffer[signature_length + 5 .. payload_size];
+    let public_key_bytes = &buffer[3293 + 5 .. 3293 + 5 + 1952];
+    let data_to_sign_bytes = &buffer[3293 + 5 .. payload_size];
 
-    let timestamp_bytes = &buffer[signature_length + 5 + 1952 .. payload_size];
+    let timestamp_bytes = &buffer[3293 + 5 + 1952 + 16 .. payload_size];
     let timestamp = utils::uint8_array_to_ts(&timestamp_bytes);
     let result = verify(signature, data_to_sign_bytes, public_key_bytes).is_ok();
     if !result {
