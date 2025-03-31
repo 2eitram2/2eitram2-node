@@ -19,24 +19,26 @@ pub fn check_ts_validity(ts: u64) -> bool {
     diff <= 10 || (ts > now && (ts - now) <= 2)
 }
 
-pub async fn send_tcp_message(ip: &IpAddr, buffer: &[u8]) -> Result<(), Box<dyn Error>> {
+pub async fn send_tcp_message(ip: &IpAddr, buffer: &[u8], dst_user_id: String) -> Result<(), Box<dyn Error>> {
     let addr: SocketAddr = SocketAddr::new(*ip, 8081);
 
-    for attempt in 1..=3 {
-        match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr)).await {
-            Ok(Ok(mut stream)) => {
-                stream.write_all(buffer).await?;
-                stream.flush().await?;
-                println!("Message sent to {}", ip);
-                return Ok(());
-            }
-            Ok(Err(e)) => eprintln!("[Attempt {}] Failed to connect to {}: {}", attempt, ip, e),
-            Err(_) => eprintln!("[Attempt {}] Connection to {} timed out", attempt, ip),
+    match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr)).await {
+        Ok(Ok(mut stream)) => {
+            stream.write_all(buffer).await?;
+            println!("data_sent");
+            stream.flush().await?;
+            println!("Message sent to {}", ip);
+            return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
+        _ => {
+            eprintln!("Connection to {} timed out", ip);
+        }
     }
-    Err(format!("Failed to send message to {} after 3 attempts", ip).into())
+
+
+    Err(format!("Failed to send message to {}", ip).into())
 }
+
 
 pub fn uint8_array_to_ts(arr: &[u8]) -> u64 {
     if arr.len() != 8 {
@@ -58,19 +60,16 @@ pub fn uint8_array_to_ts(arr: &[u8]) -> u64 {
 
 #[derive(Eq, PartialEq)]
 struct NodeDistance {
-    distance: Vec<u8>,  // XOR distance
+    distance: Vec<u8>,
     node_ip: String,
 }
 
-// Implementing the Ord trait for NodeDistance so that BinaryHeap uses it
 impl Ord for NodeDistance {
     fn cmp(&self, other: &Self) -> Ordering {
-        // We want the heap to be a min-heap, so we reverse the comparison
         self.distance.cmp(&other.distance)
     }
 }
 
-// Implementing PartialOrd for NodeDistance
 impl PartialOrd for NodeDistance {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -84,7 +83,6 @@ pub async fn find_closest_nodes(user_id_bytes: &[u8]) -> Result<(String, Vec<Str
         return Err("user_id_bytes must be at least 32 bytes long");
     }
 
-    // Limit to N closest nodes, let's say 6
     let N = 6;
 
     let mut closest_nodes = BinaryHeap::with_capacity(N);
@@ -94,7 +92,6 @@ pub async fn find_closest_nodes(user_id_bytes: &[u8]) -> Result<(String, Vec<Str
     for (node_ip, node_hash_str) in node_hash_map.iter() {
         let node_hash_bytes = hex::decode(node_hash_str).expect("Invalid hex string for node hash");
 
-        // Compute XOR distance (bitwise difference)
         let distance: Vec<u8> = user_id_bytes.iter()
             .zip(node_hash_bytes.iter())
             .map(|(a, b)| a ^ b)
@@ -105,16 +102,13 @@ pub async fn find_closest_nodes(user_id_bytes: &[u8]) -> Result<(String, Vec<Str
             node_ip: node_ip.to_string(),
         };
 
-        // Push the node into the heap
         closest_nodes.push(node_distance);
 
-        // If the heap exceeds the limit, pop the farthest node
         if closest_nodes.len() > N {
             closest_nodes.pop();
         }
     }
 
-    // The heap will now contain only the closest N nodes
     let primary_node_ip = closest_nodes.peek().map_or_else(|| "".to_string(), |x| x.node_ip.clone());
 
     let fallback_nodes: Vec<String> = closest_nodes.iter()
@@ -124,7 +118,7 @@ pub async fn find_closest_nodes(user_id_bytes: &[u8]) -> Result<(String, Vec<Str
     let end = Utc::now();
     let duration = end.signed_duration_since(start);
     println!("Took: {}ms", duration.num_milliseconds());
-
+    println!("primary node {}, fallback nodes {:?}", primary_node_ip, fallback_nodes);
     Ok((primary_node_ip, fallback_nodes))
 }
 
@@ -135,4 +129,24 @@ pub fn ip_to_bytes(ip: IpAddr) -> Vec<u8> {
         IpAddr::V4(v4) => v4.octets().to_vec(),
         IpAddr::V6(v6) => v6.octets().to_vec(),
     }
+}
+
+pub async fn save_packet(hash: String, packet: Vec<u8>) {
+    println!("Saved packet");
+    let mut store = super::super::DELAYED_DELIVERY.lock().await;
+
+    store
+        .entry(hash)
+        .and_modify(|packets| packets.push(packet.clone()))
+        .or_insert_with(|| vec![packet]);
+}
+
+pub async fn get_packets_for_user(hash: &str) -> Option<Vec<Vec<u8>>> {
+    let store = super::super::DELAYED_DELIVERY.lock().await;
+    store.get(hash).cloned()
+}
+
+pub async fn delete_packets_for_user(hash: &str) -> bool {
+    let mut store = super::super::DELAYED_DELIVERY.lock().await;
+    store.remove(hash).is_some()
 }

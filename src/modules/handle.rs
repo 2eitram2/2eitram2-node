@@ -72,7 +72,7 @@ pub async fn forward(
             Ok((primary_node_ip, _)) =>{
                 let ip: IpAddr = primary_node_ip.parse().expect("Invalid IP address");
                 if ip!= IpAddr::V4(std::net::Ipv4Addr::new(0,0,0,0)) {
-                    let _  = utils::send_tcp_message(&ip, &buffer).await;
+                    let _ = utils::send_tcp_message(&ip, &buffer, user_id_hex).await;
                 }
             }
             _ => {
@@ -131,6 +131,24 @@ pub async fn handle_connect(
     {
         let mut conn_map = CONNECTIONS.write().await;
         conn_map.insert(public_id.clone(), Arc::clone(&writer));
+    }
+    {
+        let user_packets = utils::get_packets_for_user(&public_id).await;
+        match user_packets {
+            Some(packets) => {
+                let mut locked_writer = writer.lock().await;
+
+                for packet in packets {
+                    let _ = locked_writer.write_all(&packet).await;
+                }
+    
+                println!("All packets for user {} have been processed.", public_id);
+                utils::delete_packets_for_user(&public_id).await;
+            }
+            None => {
+                println!("No packets found for user {}", public_id);
+            }
+        }
     }
     println!("Connexion request properly formated");
 }

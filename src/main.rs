@@ -16,12 +16,15 @@ use std::net::IpAddr;
 mod modules;
 
 lazy_static::lazy_static! {
+    pub static ref DELAYED_DELIVERY: Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>> = Arc::new(Mutex::new(HashMap::new()));
+}
+
+lazy_static::lazy_static! {
     pub static ref REQUEST_HASHES: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 }
 
 lazy_static::lazy_static! {
-    pub static ref CONNECTIONS: Arc<RwLock<HashMap<String, Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>>>> = 
-        Arc::new(RwLock::new(HashMap::new()));
+    pub static ref CONNECTIONS: Arc<RwLock<HashMap<String, Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>>>> = Arc::new(RwLock::new(HashMap::new()));
 }
 
 lazy_static::lazy_static! {
@@ -40,10 +43,10 @@ async fn main() -> std::io::Result<()> {
     let _ = modules::load::remake_nodes_hashmap("nodes.txt", &NODES_HASHMAP).await;
     loop {
         let (socket, addr) = match listener.accept().await {
-            Ok(pair) => pair,   // If successful, unpack the tuple
+            Ok(pair) => pair,
             Err(e) => {
                 eprintln!("Failed to accept connection: {}", e);
-                continue;  // Skip this iteration and try again
+                continue;
             }
         };
 
